@@ -229,31 +229,46 @@ def generate_report_pdf(pil_img, overlay, saliency, probs, pred_name, confidence
         max_w = max_w_cm * cm
         return RLImage(buf, width=max_w, height=max_w * img.height / img.width)
 
+    story.append(Spacer(1, 0.3 * cm))
     story.append(Paragraph("Visual Explanations", h2_style))
-    MAX_IMG_H = 6 * cm
-    aspect = pil_img.width / pil_img.height
-    orig_h = MAX_IMG_H; orig_w = min(orig_h * aspect, INNER)
-    if orig_w == INNER:
-        orig_h = INNER / aspect
-    buf0 = io.BytesIO(); pil_img.save(buf0, format="PNG"); buf0.seek(0)
-    story.append(RLImage(buf0, width=orig_w, height=orig_h))
 
-    cell_w = INNER / 2
-    img_w_cm = (cell_w - 10) / cm
+    # Small image size so the table + all three images fit on page 1.
+    SMALL_W = 5.2 * cm   # width of each small image
+
+    # Row 1: original lesion, left-aligned, small.
+    aspect = pil_img.width / pil_img.height
+    orig_w = SMALL_W
+    orig_h = orig_w / aspect
+    buf0 = io.BytesIO(); pil_img.save(buf0, format="PNG"); buf0.seek(0)
+    orig_rl = RLImage(buf0, width=orig_w, height=orig_h)
+    cap_o = Paragraph("Original", ParagraphStyle("capo", fontSize=7,
+                      textColor=colors.grey, alignment=0, spaceBefore=2))
+    orig_tbl = Table([[orig_rl], [cap_o]], colWidths=[orig_w], hAlign="LEFT")
+    orig_tbl.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(orig_tbl)
+
+    # Row 2: Grad-CAM + SmoothGrad side by side, left-aligned, small.
+    img_w_cm = SMALL_W / cm
     row_imgs = [pil_to_rl(overlay, img_w_cm)]
     row_caps = ["Grad-CAM"]
     if saliency is not None:
         row_imgs.append(pil_to_rl(saliency, img_w_cm)); row_caps.append("SmoothGrad")
-    img_tbl = Table([row_imgs], colWidths=[cell_w] * len(row_imgs))
-    img_tbl.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                                 ("RIGHTPADDING", (0, 0), (-1, -1), 6)]))
-    story.append(img_tbl)
-    cap_tbl = Table([row_caps], colWidths=[cell_w] * len(row_caps))
-    cap_tbl.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                                 ("FONTSIZE", (0, 0), (-1, -1), 7),
-                                 ("TEXTCOLOR", (0, 0), (-1, -1), colors.grey)]))
-    story.append(cap_tbl)
+    maps_tbl = Table([row_imgs, row_caps], colWidths=[SMALL_W] * len(row_imgs), hAlign="LEFT")
+    maps_tbl.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+        ("FONTSIZE", (0, 1), (-1, 1), 7),
+        ("TEXTCOLOR", (0, 1), (-1, 1), colors.grey),
+    ]))
+    story.append(maps_tbl)
 
     story.append(PageBreak())
     story.append(Paragraph("Class Probabilities", h2_style))

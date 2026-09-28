@@ -5,11 +5,11 @@ Adapted from the research project's xai.py to the multimodal model:
   * hooks live on  model.backbone.blocks[-1]  (timm EfficientNet inside the fusion model)
   * every forward needs (image, metadata)
   * metadata SHAP is computed per-model with the real image fixed (as in notebook 13)
-  * image-vs-metadata ablation is computed on the 0.6 / 0.4 ensemble
+  * image-vs-metadata ablation is computed on the 0.5 / 0.5 ensemble
 
 Two models are involved:
   loc  -> localization metadata (15 features)
-  sa   -> sex + age metadata    (4 features)
+  sa   -> sex + age + localization metadata (19 features; name kept for continuity)
 """
 
 import cv2
@@ -25,7 +25,8 @@ LOC_FEATURE_NAMES = [
     'foot', 'genital', 'hand', 'lower extremity', 'neck',
     'scalp', 'trunk', 'unknown', 'upper extremity'
 ]
-SA_FEATURE_NAMES = ['male', 'female', 'unknown', 'age']
+SA_FEATURE_NAMES = (['sex: male', 'sex: female', 'sex: unknown', 'age']
+                    + ['loc: ' + z for z in LOC_FEATURE_NAMES])   # encoding order: sex, age, loc
 
 
 # ── Map helpers ───────────────────────────────────────────────────────────────
@@ -127,9 +128,9 @@ def run_shap_metadata(model, img_t, meta_vec, background_meta, target_class, dev
     return np.asarray(sv[0, :, target_class])
 
 
-# ── Image vs metadata ablation (ensemble 0.6/0.4) ─────────────────────────────
+# ── Image vs metadata ablation (ensemble 0.5/0.5) ─────────────────────────────
 def compute_image_vs_metadata_contrib(models, img_t, meta_loc, meta_sa,
-                                       bg_loc, bg_sa, target_class, w1=0.6, w2=0.4):
+                                       bg_loc, bg_sa, target_class, w1=0.5, w2=0.5):
     """
     2-point ablation of image vs metadata on the ENSEMBLE probability of
     target_class for a single case. Baselines: zero image, background metadata.

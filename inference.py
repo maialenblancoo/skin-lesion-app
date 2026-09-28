@@ -3,16 +3,21 @@ inference.py — Inference engine for the multimodal skin-lesion app.
 
 Self-contained version for Streamlit Cloud: it does NOT depend on the research
 project's config.py / dataset.py. All constants are defined here, and the two
-trained models are downloaded from the Hugging Face Hub at runtime.
+trained models are loaded from a local folder (env SKIN_LESION_MODELS_DIR, or ./models)
+if present, otherwise downloaded from the Hugging Face Hub at runtime.
 
 Pipeline (final system, selected on validation):
     TTA (5 augmentations) per model
-        -> selective weighted ensemble (localization 0.6 / sex_age 0.4)
-        -> melanoma decision threshold 0.30
+        -> selective weighted ensemble (localization 0.5 / sex+age+localization 0.5)
+        -> melanoma decision threshold 0.25
+Branches, weights and threshold are all selected on fold-2 validation data, exactly as in
+the manuscript (research repo: audit/select_branches_val.py, audit/rerun_valsel.py).
 
 Uncertainty (MC Dropout) is a separate, optional signal — it does not change the
-diagnosis. It reproduces notebook 12 (flat 0.6/0.4 ensemble, no TTA, T=30 passes).
+diagnosis. It reproduces notebook 12 (flat 0.5/0.5 ensemble, no TTA, T=30 passes).
 """
+
+import os
 
 import numpy as np
 import torch
@@ -47,18 +52,20 @@ LOC_CATEGORIES = [
     'scalp', 'trunk', 'unknown', 'upper extremity'
 ]
 METADATA_COLS_LOC = ['localization']
-METADATA_COLS_SA  = ['sex', 'age']
+METADATA_COLS_SA  = ['sex', 'age', 'localization']
 
 # -- Final-system hyper-parameters (selected on validation) --
-W_PRIMARY     = 0.6
-W_SECONDARY   = 0.4
-MEL_THRESHOLD = 0.30
-AGE_MEAN      = 51.9
+W_PRIMARY     = 0.5    # localization branch
+W_SECONDARY   = 0.5    # sex+age+localization branch
+MEL_THRESHOLD = 0.25   # explicit validation rule (manuscript Section II-E)
+AGE_MEAN      = 51.77  # fold-2 training-split mean age (missing-age imputation)
 
 # -- Hugging Face model repo --
 HF_REPO   = "maialenblancoo/skin-lesion-pfg"
-LOC_FILE  = "multimodal_b0_none_localization_fold0.pth"
-SA_FILE   = "multimodal_b0_none_sex_age_fold0.pth"
+LOC_FILE  = "multimodal_b0_none_localization_fold2.pth"
+SA_FILE   = "multimodal_b0_none_sex_age_localization_fold2.pth"
+LOCAL_MODELS_DIR = os.environ.get("SKIN_LESION_MODELS_DIR",
+                                  os.path.join(os.path.dirname(__file__), "models"))
 
 # -- Image transforms --
 MEAN = [0.485, 0.456, 0.406]
@@ -95,19 +102,32 @@ def encode_metadata(sex, age, localization, metadata_cols, age_mean=AGE_MEAN):
     return np.array(features, dtype=np.float32)
 
 
+def metadata_dim(metadata_cols):
+    """Length of the encoded metadata vector (localization 15, sex+age+localization 19)."""
+    return len(encode_metadata(None, None, None, metadata_cols))
+
+
+def _model_path(filename):
+    """Local checkpoint if available, otherwise download from the Hugging Face Hub."""
+    local = os.path.join(LOCAL_MODELS_DIR, filename)
+    if os.path.exists(local):
+        return local
+    return hf_hub_download(repo_id=HF_REPO, filename=filename)
+
+
 def load_models(device=None):
-    """Download both models from HF Hub and load them. Wrap in st.cache_resource."""
+    """Load both models (local folder or HF Hub). Wrap in st.cache_resource."""
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    loc_path = hf_hub_download(repo_id=HF_REPO, filename=LOC_FILE)
-    sa_path  = hf_hub_download(repo_id=HF_REPO, filename=SA_FILE)
-    model_loc = MultimodalModel(metadata_dim=len(LOC_CATEGORIES),
+    loc_path = _model_path(LOC_FILE)
+    sa_path  = _model_path(SA_FILE)
+    model_loc = MultimodalModel(metadata_dim=metadata_dim(METADATA_COLS_LOC),
                                 efficientnet_version='b0', pretrained=False)
-    model_loc.load_state_dict(torch.load(loc_path, map_location=device))
+    model_loc.load_state_dict(torch.load(loc_path, map_location=device, weights_only=False))
     model_loc = model_loc.to(device).eval()
-    model_sa = MultimodalModel(metadata_dim=len(SEX_CATEGORIES) + 1,
+    model_sa = MultimodalModel(metadata_dim=metadata_dim(METADATA_COLS_SA),
                                efficientnet_version='b0', pretrained=False)
-    model_sa.load_state_dict(torch.load(sa_path, map_location=device))
+    model_sa.load_state_dict(torch.load(sa_path, map_location=device, weights_only=False))
     model_sa = model_sa.to(device).eval()
     return {'loc': model_loc, 'sa': model_sa, 'device': device}
 

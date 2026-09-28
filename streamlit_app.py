@@ -1,8 +1,8 @@
 """
 Streamlit application for multimodal skin lesion classification.
 Final system: EfficientNet-B0 image branch + clinical metadata, late fusion,
-selective weighted ensemble (localization 0.6 / sex_age 0.4) + melanoma
-threshold 0.30. Explainability: Grad-CAM, SmoothGrad, metadata SHAP,
+selective weighted ensemble (localization 0.5 / sex+age+localization 0.5) + melanoma
+threshold 0.25. Explainability: Grad-CAM, SmoothGrad, metadata SHAP,
 image-vs-metadata ablation, MC-Dropout uncertainty.
 Dataset: HAM10000 | TFG - Maialen Blanco Ibarra, Universidad de Deusto
 """
@@ -37,18 +37,19 @@ CLASS_LABELS = {
     "vasc":  "Vascular Lesion",
 }
 MEL_IDX         = inf.MEL_IDX
-MEL_THRESHOLD   = inf.MEL_THRESHOLD     # 0.30
+MEL_THRESHOLD   = inf.MEL_THRESHOLD     # 0.25
 UNCERTAINTY_ENT = 0.50                  # entropy above this -> high uncertainty
 
 LOCATIONS = inf.LOC_CATEGORIES
 SEXES     = inf.SEX_CATEGORIES
 
-# Locations with high melanoma prevalence but underrepresented in training
-# (from the shortcut-learning analysis, notebook 13).
+# Locations with above-average melanoma prevalence but few training lesions, which the
+# localization branch underweights (shortcut analysis, notebook 13; manuscript Suppl. S5).
+# Values: (melanoma prevalence in the fold-2 training split, %, number of training lesions),
+# from outputs/metrics/shortcut_zones_valsel.csv. Overall training prevalence is ~11%.
 HIGH_RISK_UNDERREPRESENTED = {
-    "ear":  31.7,
-    "face": 18.0,
-    "neck": 16.7,
+    "ear":  (18.2, 33),
+    "neck": (16.9, 118),
 }
 
 CLASS_DESCRIPTIONS = {
@@ -78,15 +79,17 @@ def load_models():
 
 def build_backgrounds():
     """One paired background row per localization, with mean sex/age, so SHAP and
-    the ablation always have contrast. Returns (bg_loc (15,15), bg_sa (15,4))."""
+    the ablation always have contrast. Returns (bg_loc (15,15), bg_sa (15,19)); the
+    secondary branch encodes sex (3), age (1) and localization (15), in that order."""
     n = len(LOCATIONS)
     bg_loc = np.zeros((n, len(LOCATIONS)), dtype=np.float32)
     for i in range(n):
         bg_loc[i, i] = 1.0
-    bg_sa = np.zeros((n, len(SEXES) + 1), dtype=np.float32)
-    bg_sa[:, 0] = 0.56          # mean male fraction
-    bg_sa[:, 1] = 0.44          # mean female fraction
-    bg_sa[:, 3] = 51.9 / 90.0   # mean age normalized
+    bg_sa = np.zeros((n, len(SEXES) + 1 + len(LOCATIONS)), dtype=np.float32)
+    bg_sa[:, 0] = 0.56                  # mean male fraction
+    bg_sa[:, 1] = 0.44                  # mean female fraction
+    bg_sa[:, 3] = inf.AGE_MEAN / 90.0   # mean age normalized
+    bg_sa[:, 4:] = bg_loc               # paired localization one-hot
     return bg_loc, bg_sa
 
 
@@ -186,7 +189,7 @@ def generate_report_pdf(pil_img, overlay, saliency, probs, pred_name, confidence
     story.append(Paragraph("Skin Lesion Classification Report", title_style))
     story.append(Spacer(1, 0.2 * cm))
     story.append(Paragraph(
-        "EfficientNet-B0 multimodal · ensemble 0.6/0.4 · melanoma threshold 0.30 "
+        "EfficientNet-B0 multimodal · ensemble 0.5/0.5 · melanoma threshold 0.25 "
         "· HAM10000 · Universidad de Deusto 2026", sub_style))
 
     pred_color = (colors.HexColor("#e53e3e") if pred_name == "mel" else
@@ -295,7 +298,7 @@ def generate_report_pdf(pil_img, overlay, saliency, probs, pred_name, confidence
     else:
         story.append(Paragraph(
             "Localization model SHAP" +
-            ("" if agree else " — shown together with the sex/age model because the "
+            ("" if agree else " — shown together with the sex/age/location model because the "
                               "two models disagreed on this case."), note_style))
         loc_order = np.argsort(np.abs(shap_loc))[::-1][:8]
         loc_data = [["Localization feature", "SHAP value"]]
@@ -313,8 +316,8 @@ def generate_report_pdf(pil_img, overlay, saliency, probs, pred_name, confidence
         story.append(lt)
         if (not agree) and (shap_sa is not None):
             story.append(Spacer(1, 0.3 * cm))
-            sa_data = [["Sex/Age feature", "SHAP value"]]
-            for i in range(len(shap_sa)):
+            sa_data = [["Sex/Age/Location feature", "SHAP value"]]
+            for i in np.argsort(np.abs(shap_sa))[::-1][:8]:
                 sa_data.append([xai.SA_FEATURE_NAMES[i], f"{shap_sa[i]:+.5f}"])
             sat = Table(sa_data, colWidths=[INNER * 0.6, INNER * 0.4])
             sat.setStyle(TableStyle([
@@ -387,7 +390,7 @@ st.markdown("""
 st.markdown('<p class="main-title">🔬 Skin Lesion Classifier</p>', unsafe_allow_html=True)
 st.markdown(
     '<p class="subtitle">Multimodal deep learning · EfficientNet-B0 + clinical metadata · '
-    'ensemble 0.6/0.4 · melanoma threshold 0.30 · HAM10000 · Explainable AI</p>',
+    'ensemble 0.5/0.5 · melanoma threshold 0.25 · HAM10000 · Explainable AI</p>',
     unsafe_allow_html=True)
 st.divider()
 
@@ -418,22 +421,24 @@ opinion. It is not an auto-diagnostic or at-home diagnostic device,
 and does not replace clinical judgment.
                     
 **System:** EfficientNet-B0 multimodal, selective weighted ensemble
-(localization 0.6 / sex_age 0.4) + melanoma threshold 0.30.
+(localization 0.5 / sex+age+localization 0.5) + melanoma threshold 0.25,
+all selected on validation data.
 
 **Dataset:** HAM10000 — 10,015 images, 7 classes.
 
-| Metric | Value |
+| Metric (held-out test set) | Value |
 |--------|-------|
-| Melanoma Recall | 0.857 |
-| Melanoma ROC-AUC | 0.967 |
-| Macro Recall | 0.726 |
+| Melanoma Recall | 0.881 |
+| BCC Recall | 0.883 |
+| Macro ROC-AUC | 0.967 |
+| Macro Recall | 0.733 |
 
-**Inference:** TTA ×5 · threshold 0.30 (validation-selected).
+**Inference:** TTA ×5 · threshold 0.25 (validation-selected).
 
 **XAI:** Grad-CAM, SmoothGrad, metadata SHAP, image-vs-metadata ablation,
 MC-Dropout uncertainty.
 
-**Limitations:** underrepresented locations (ear, face, neck);
+**Limitations:** rare locations are underweighted (e.g., ear, neck);
 not validated outside HAM10000.
 
 **Author:** Maialen Blanco Ibarra · Universidad de Deusto, 2026
@@ -542,10 +547,10 @@ if analyze_btn or "last_result" in st.session_state:
                                        location, "Localization model — SHAP")
                 st.pyplot(fig); plt.close(fig)
             if (not agree) and (shap_sa is not None):
-                st.caption("Models disagreed → showing the sex/age model too:")
+                st.caption("Models disagreed → showing the sex/age/location model too:")
                 active_sa = "age"
                 fig2 = render_shap_plot(shap_sa, xai.SA_FEATURE_NAMES,
-                                        active_sa, "Sex/Age model — SHAP")
+                                        active_sa, "Sex/Age/Location model — SHAP")
                 st.pyplot(fig2); plt.close(fig2)
             elif agree:
                 st.caption("Both models agreed → localization (primary) model shown.")
@@ -602,11 +607,11 @@ if analyze_btn or "last_result" in st.session_state:
             unsafe_allow_html=True)
 
         if location in HIGH_RISK_UNDERREPRESENTED:
-            prev = HIGH_RISK_UNDERREPRESENTED[location]
+            prev, n_train = HIGH_RISK_UNDERREPRESENTED[location]
             st.markdown(
                 f'<div class="flag-box">🚩 <b>High-risk location notice</b> — '
-                f'<i>{location}</i> has a real-world melanoma prevalence of <b>{prev}%</b> '
-                f'but is underrepresented in training (n&lt;100). The model may underweight it. '
+                f'<i>{location}</i> had a melanoma prevalence of <b>{prev}%</b> in the training data '
+                f'but only {n_train} training lesions. The model may underweight it. '
                 f'<b>Consider specialist referral regardless of prediction.</b></div>',
                 unsafe_allow_html=True)
 
